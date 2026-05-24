@@ -1,16 +1,16 @@
-# DiT4DiT SONIC G1 Execution Plan (synthesis)
+# DiT4DiT SONIC G1 Execution Plan
 
-> Synthesis of [2026-05-20-sonic-token-adaptation.md](2026-05-20-sonic-token-adaptation.md) and [2026-05-21-dit4dit-sonic-g1-vla-run-plan.md](2026-05-21-dit4dit-sonic-g1-vla-run-plan.md), with empirical pre-flight added.
->
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task.
 
-**Goal:** Train and evaluate a DiT4DiT policy that predicts SONIC's 78D continuous latent-action chunks for the Unitree G1, then expose it to SONIC through a thin policy-client adapter — *only* after the offline interface is proven.
+**Goal:** Train and evaluate a DiT4DiT policy that predicts SONIC's 78D continuous latent-action chunks for the Unitree G1, then run it in-process inside SONIC's existing inference loop — *only* after the offline interface is proven.
 
-**Architecture:** Two repos, one tensor boundary.
+**Architecture:** Two repos, one tensor boundary, in-process integration.
 
-- `DiT4DiT` (this repo, `experiment/sonic-token-actions`) owns: action schema, data config, training config, smoke/overfit, offline replay metrics, policy server.
-- `GR00T-WholeBodyControl` owns: data export, deployment, safety, publishing. Will receive a small policy-client adapter in a later branch (`experiment/dit4dit-policy-client`).
-- Interface: a LeRobot v2.1 dataset directory and a WebSocket payload schema. Nothing is vendored across.
+- `DiT4DiT` (this repo, `experiment/sonic-token-actions`) owns: action schema, data config, training config, smoke/overfit, offline replay metrics, and a checkpoint + `stats.json` artifact.
+- `GR00T-WholeBodyControl` owns: data export, deployment, safety, publishing. Will receive a small in-process adapter in a later branch (`experiment/dit4dit-policy-client`) that imports DiT4DiT directly — no network protocol between them.
+- Interface: a LeRobot v2.1 dataset directory for training and a `(checkpoint, stats.json)` pair for inference. Nothing is vendored across.
+
+**Integration rationale:** SONIC's existing VLA loop ([run_vla_inference.py](file:///home/daniel/dev/groot-wholebodycontrol/sonic-vla-pipeline/gear_sonic/scripts/run_vla_inference.py)) talks to an Isaac-GR00T `PolicyClient` over ZMQ. For the first end-to-end bring-up we fork that script and replace the `PolicyClient.get_action(...)` call with an in-process `vla.predict_action(...)`. No new protocol, no server process, no payload schema bug to chase. A separate-machine network deployment (Isaac-GR00T-compatible ZMQ server) is a later concern, not part of this plan.
 
 **Tech stack:** DiT4DiT, Cosmos-Predict2.5-2B, PyTorch 2.7 / CUDA 12.8, Accelerate/DeepSpeed, SONIC VLA data exported from `NVlabs/GR00T-WholeBodyControl`.
 
@@ -38,7 +38,7 @@ Target deployment horizon: `H = 40`. Final model output shape: `[B, 40, 78]`. A 
 - [DiT4DiT/dataloader/gr00t_lerobot/data_config.py:1029](../../DiT4DiT/dataloader/gr00t_lerobot/data_config.py#L1029): `UnitreeG1AlohaOnlyArmsDataConfig` exists, uses `video.ego_view`, `annotation.human.task_description`, `action_indices = list(range(16))`, `min_max` normalization for all action keys.
 - [DiT4DiT/dataloader/gr00t_lerobot/mixtures.py:391](../../DiT4DiT/dataloader/gr00t_lerobot/mixtures.py#L391): `real_robot_all` lists 7 folder names (pnp_eggplant_lh_200ep_26_1_28, pnp_corn_middle_drawer, …) that are *not* publicly downloadable from this repo and target ALOHA arms, not SONIC.
 - `/home/daniel/dev/groot-wholebodycontrol/sonic-vla-pipeline/gear_sonic/data/features_sonic_vla.py`: confirms the SONIC export writes exactly `action.motion_token` (64), `action.left_hand_joints` (7), `action.right_hand_joints` (7), `annotation.human.task_description`, at `FPS=50`.
-- [deployment/model_server/tools/websocket_policy_server.py:114](../../deployment/model_server/tools/websocket_policy_server.py#L114): server calls `predict_action(**msg)` even when the protocol comment promises `payload` extraction — known bug, fixed in Phase 5.
+- `/home/daniel/dev/groot-wholebodycontrol/sonic-vla-pipeline/gear_sonic/scripts/run_vla_inference.py`: existing inference loop is ZMQ end-to-end and uses Isaac-GR00T's `PolicyClient` over REQ/REP. This is what the in-process adapter will fork.
 
 **Data conclusion:** training data must come from the GR00T-WholeBodyControl exporter. The existing `real_robot_all` mixture is evidence the repo loads real G1 data, but provides neither the data nor the right action schema.
 
@@ -81,27 +81,55 @@ On non-Clariden machines, substitute the appropriate scratch/project path. `resu
 - Writes: `docs/sonic_g1_data_inventory.md` with all of the above, plus a markdown table per-dim min/max/p1/p99 for `action.motion_token`.
 - Asserts: every episode has ≥40 future action steps after its observation window.
 
-**If no SONIC export exists yet:** generate one before this phase. Either run the exporter manually (storing outside `$HOME`):
+**Data acquisition: three tiers, pick the cheapest one that unblocks the next phase.**
+
+There is no public SONIC VLA dataset (HuggingFace has the SONIC controller checkpoint and BONES-SEED motions, but no LeRobot dataset with `action.motion_token + hand_joints`). So data has to come from one of:
+
+1. **Synthetic fixture (default for Phases 1–6).** Generate a tiny LeRobot v2.1 dataset with the right keys, shapes, dtypes, and metadata — but random-noise content. Sufficient for: dataloader shape contract, model forward smoke, and the tiny-overfit gate (the model *can* overfit random data with the right shape; the loss-down signal proves the head and config are wired correctly). Insufficient for: anything in Phase 7 (offline eval).
+
+   Create `tools/sonic/make_synthetic_sonic_dataset.py` that writes a LeRobot v2.1 directory under `$SONIC_DATA_ROOT/synthetic-tiny/` with:
+   - 20 episodes × 60 steps each
+   - `observation.images.ego_view`: random `uint8` `[H, W, 3]` at the configured FPS
+   - `action.motion_token`: random `float32 [T, 64]` from a bounded distribution (e.g. `tanh(N(0, 1))`)
+   - `action.left_hand_joints` / `action.right_hand_joints`: random `float32 [T, 7]` in `[0, 1]`
+   - `annotation.human.task_description`: one of three canned strings
+   - `meta/info.json`, `meta/modality.json`, `meta/episodes.jsonl`, `meta/stats.json` populated correctly so DiT4DiT's loader accepts it
+
+2. **MuJoCo sim collection.** If you have the SONIC sim2sim setup working, `gear_sonic/scripts/run_sim_loop.py` + `run_data_exporter.py` can collect real-shape data without a physical robot, using scripted or teleoperated actions in MuJoCo. Better than synthetic for Phase 7 trial runs; still not a substitute for real teleop data on real hardware. The docs ([data_collection.md](file:///home/daniel/dev/groot-wholebodycontrol/main/docs/source/tutorials/data_collection.md)) confirm sim mode publishes camera frames automatically — no camera server needed.
+
+3. **Real teleop collection.** Required to *trust* Phase 7 metrics for a real-robot decision. Workstation + PICO VR + camera server on a Jetson + a SONIC-controlled G1. This is the heavyweight option — set it up only after the synthetic-fixture path has proven the model architecture and training loop are sound.
+
+**Commands:**
 
 ```bash
-cd /home/daniel/dev/groot-wholebodycontrol/sonic-vla-pipeline
+# Tier 1: synthetic (use this first)
+PYTHONPATH=. python tools/sonic/make_synthetic_sonic_dataset.py \
+  --output-dir "$SONIC_DATA_ROOT/synthetic-tiny" \
+  --num-episodes 20 --steps-per-episode 60
+
+# Tier 2: sim (only if sim2sim already works on your box)
+cd /home/daniel/dev/groot-wholebodycontrol/main
 source .venv_data_collection/bin/activate
 python gear_sonic/scripts/run_data_exporter.py \
   --task-prompt "pick up the cup" \
-  --dataset-name sonic_g1_pick_cup \
+  --dataset-name sonic_g1_pick_cup_sim \
   --root-output-dir "$SONIC_DATA_ROOT"
+
+# Tier 3: real teleop (only when ready to commit to bring-up)
+# See docs/source/tutorials/data_collection.md in the GR00T-WholeBodyControl repo.
 ```
 
-Or, if `launch_data_collection.py` is needed for full real-robot pipeline, first patch it to pass `--root-output-dir` through; the current launcher dataclass exposes only `dataset_name`.
+`launch_data_collection.py` currently exposes only `dataset_name` in its dataclass — not `root_output_dir`. For serious collection (tier 2 or 3), call `run_data_exporter.py` directly with `--root-output-dir`, or patch the launcher to pass it through.
 
-**Verification:**
+**Verification (against whichever tier you ran):**
 
 ```bash
 PYTHONPATH=. python tools/sonic/inspect_sonic_lerobot_dataset.py \
-  --dataset-root "$SONIC_DATA_ROOT" --limit-episodes 3 --save-histograms
+  --dataset-root "$SONIC_DATA_ROOT/synthetic-tiny" \
+  --limit-episodes 3 --save-histograms
 ```
 
-Exit 0 and `docs/sonic_g1_data_inventory.md` populated with concrete values — no `TODO` placeholders survive into later phases.
+Exit 0 and `docs/sonic_g1_data_inventory.md` populated. For synthetic data, the inventory will record arbitrary stats — that's fine for Phases 1–6; the inventory must be **regenerated against real data before Phase 7**.
 
 ---
 
@@ -320,27 +348,7 @@ right_hand_joints shape: [40, 7]
 
 ---
 
-## Phase 5: WebSocket protocol fix
-
-**Objective:** Make the policy server protocol deterministic before the SONIC adapter exists. Network-protocol bugs do not get debugged on a robot.
-
-**Files:**
-
-- Modify: [deployment/model_server/tools/websocket_policy_server.py:114](../../deployment/model_server/tools/websocket_policy_server.py#L114)
-- Create: `tests/test_websocket_policy_payload.py`
-
-**Fix:** the server comment at line 89 promises `{"type": "infer", "payload": {...}}` extraction; the code calls `predict_action(**msg)`. Either:
-
-- Make the server extract `payload = msg.get("payload", msg)` and call `predict_action(**payload)`, **or**
-- Document and enforce the flat shape `{"type": "infer", "examples": [...]}` and reject `payload`.
-
-Pick one shape, document it in a docstring, and add tests for both the structured and flat cases.
-
-**Verify:** `PYTHONPATH=. pytest tests/test_websocket_policy_payload.py -q`
-
----
-
-## Phase 6: Model forward / predict smoke
+## Phase 5: Model forward / predict smoke
 
 **Objective:** Confirm DiT4DiT can construct and sample `[1, 40, 78]` on the SONIC config.
 
@@ -365,9 +373,11 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python tools/sonic/smoke_sonic_model.py \
 
 ---
 
-## Phase 7: Tiny overfit
+## Phase 6: Tiny overfit
 
-**Objective:** Confirm the head can fit a small SONIC subset before booking real cluster time.
+**Objective:** Confirm the head can fit a small SONIC-shaped subset before booking real cluster time.
+
+**Data tier:** synthetic fixture from Phase 0 is sufficient. The pass gate here is *structural* — does the model architecture + training loop converge on a fixed small target? — not predictive of real-robot behavior. Re-running this on real data later is cheap and worth doing once available, but is not the gate for moving to Phase 7.
 
 **Files:**
 
@@ -375,7 +385,7 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python tools/sonic/smoke_sonic_model.py \
 
 **Budget:**
 
-- 10–50 trajectories from `sonic_g1_token_all`.
+- 10–50 trajectories from `sonic_g1_token_all` (point the mixture at `synthetic-tiny/` for the first pass).
 - 1 GPU if it fits; otherwise the smallest multi-GPU run that does.
 - 500–2,000 steps, frozen text encoder + VAE.
 - Outputs at `$DIT4DIT_RUN_ROOT/tiny-overfit-<date>`.
@@ -395,9 +405,11 @@ CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. python tools/sonic/smoke_sonic_model.py \
 
 ---
 
-## Phase 8: Held-out offline evaluation + **normalization-stats export contract**
+## Phase 7: Held-out offline evaluation + **normalization-stats export contract**
 
 **Objective:** Decide whether the model is worth wiring to a robot. **Also: produce the artifact the SONIC adapter will depend on — the dataset normalization stats.**
+
+**Data tier:** real teleop data (tier 3) or, at minimum, MuJoCo sim collection (tier 2). The synthetic fixture is *not acceptable* here — held-out metrics on random data are meaningless and the `stats.json` produced from synthetic data would mislead the SONIC adapter at deployment. Regenerate `docs/sonic_g1_data_inventory.md` against real data before entering this phase.
 
 **Files:**
 
@@ -447,40 +459,56 @@ PYTHONPATH=. python examples/Real_G1/eval_files/eval_sonic_g1_offline.py \
 
 ---
 
-## Phase 9: SONIC-side policy-client adapter (separate repo, separate branch)
+## Phase 8: In-process SONIC adapter (separate repo, separate branch)
 
 **Repo:** `/home/daniel/dev/groot-wholebodycontrol/`
 **Worktree:** `/home/daniel/dev/groot-wholebodycontrol/dit4dit-policy-client`
 **Branch:** `experiment/dit4dit-policy-client`
 
-Do *not* implement this phase in DiT4DiT. The contract crossing the line is the normalized 78D tensor and the `stats.json` file.
+Do *not* implement this phase in DiT4DiT. The artifacts crossing the line are the trained checkpoint and `stats.json`.
 
-**Files likely created in GR00T-WholeBodyControl:**
+**Approach:** fork `gear_sonic/scripts/run_vla_inference.py` into `run_dit4dit_inference.py`. The fork keeps every ZMQ socket (state SUB, action PUB, camera, keyboard, telemetry) and every existing helper (`prepare_observation_for_eval`, `concat_action`, `should_trigger_new_inference`, `calculate_latency_compensated_index`). Only the policy call changes.
 
-- `gear_sonic/utils/inference/dit4dit_client.py`
-- `gear_sonic/scripts/run_dit4dit_inference.py`
+**What to replace:**
 
-**Adapter responsibilities:**
+- Remove the Isaac-GR00T `PolicyClient` connection (`host`, `port` CLI args, ZMQ REQ socket setup).
+- At startup, load DiT4DiT in-process:
+  ```python
+  from DiT4DiT.model.framework.base_framework import baseframework
+  vla = baseframework.from_pretrained(args.ckpt_path).to("cuda").eval()
+  stats = json.load(open(args.stats_path))
+  ```
+- In the inference tick, replace `policy_client.get_action(obs)` with:
+  ```python
+  out = vla.predict_action(examples=[build_example(obs, prompt)])
+  normalized = out["normalized_actions"]              # [1, 40, 78]
+  action = unnormalize(normalized, stats)              # apply per-key inverse transform
+  motion_token       = action[0, :, 0:64]
+  left_hand_joints   = action[0, :, 64:71]
+  right_hand_joints  = action[0, :, 71:78]
+  ```
+- Hand the resulting chunk to the existing `concat_action` / publish path — do not rewrite range checks, latency compensation, or publishing.
 
-1. Collect camera/state/language the same way `run_vla_inference.py` does today.
-2. Build the DiT4DiT example payload and call the policy server.
-3. Receive `normalized_actions: [1, 40, 78]`.
-4. **Unnormalize using `stats.json` shipped from training.** No vibes-based scaling.
-5. Split into `motion_token / left_hand_joints / right_hand_joints` via the canonical slices.
-6. Reuse existing SONIC publish / range-check / rate-limit logic — do not rewrite it.
+**New CLI args** (replacing `host`/`port`):
 
-The adapter must default to `--enable-publish=false`. Publishing requires an explicit flag.
+- `--ckpt-path`: path to the DiT4DiT checkpoint.
+- `--stats-path`: path to `stats.json` from Phase 7.
+- `--enable-publish`: default `False`. Required to actually push actions to the C++ controller.
+
+**Why no Isaac-GR00T-compatible ZMQ server:** keeping it in-process means one process to launch, no protocol matching, and the SONIC repo only adds one new script plus a small `dit4dit_runner.py` utility. If a future deployment needs the model on a separate box, wrap `vla.predict_action` in an Isaac-GR00T-compatible PolicyServer then; do not pay that cost now.
+
+**Cost of in-process to keep in mind:** if DiT4DiT crashes the inference process exits with it. Acceptable for bring-up and offline replay; revisit if sustained robot work depends on it.
 
 ---
 
-## Phase 10: Robot ladder
+## Phase 9: Robot ladder
 
-Only after Phases 0–9 pass.
+Only after Phases 0–8 pass.
 
 1. Unit tests: schema split/concat.
 2. Dataset test: one real sample emits `[40, 78]`.
 3. Model test: `predict_action` returns `[1, 40, 78]`.
-4. Server test: structured + flat WebSocket payloads.
+4. Adapter smoke: `run_dit4dit_inference.py` runs against logged observations with publish disabled.
 5. Offline replay: predictions vs logged SONIC ground truth.
 6. Decoder-only test: predicted chunks through the SONIC latent decoder, motors off.
 7. Robot dry-run: live perception, inference only, no publish.
@@ -495,7 +523,6 @@ Only after Phases 0–9 pass.
 - Max `|motion_token|` guard active, set from training distribution.
 - Hand-joint software limits active.
 - Stale-action timeout active.
-- Server-disconnect behavior tested.
 - Logs land outside `$HOME`.
 - Checkpoint SHA, `stats.json` SHA, dataset SHA all recorded with the run.
 
@@ -513,13 +540,13 @@ Only after Phases 0–9 pass.
 
 ## Acceptance criteria for this branch
 
-- `pytest` passes for schema / data-config / WebSocket tests.
+- `pytest` passes for schema / data-config tests.
 - A real SONIC LeRobot sample loads with shape `[40, 78]` through `unitree_g1_sonic_token`.
 - `dit4dit_sonic_g1.yaml` parses with the asserted values; all artifact paths resolve outside `$HOME`.
 - Tiny overfit shows decreasing per-slice loss on a small subset.
 - Offline evaluator produces per-slice metrics, range-violation rate, and a `stats.json` next to the checkpoint.
-- Policy server returns `[1, 40, 78]` for both structured and flat WebSocket payloads.
-- The robot-side work is genuinely a thin adapter in the other repo, not a science project.
+- In-process call to `vla.predict_action(...)` returns `[1, 40, 78]` and unnormalizes cleanly with the exported `stats.json`.
+- The robot-side work is genuinely a forked `run_dit4dit_inference.py` in the other repo, not a science project.
 
 ---
 
@@ -527,10 +554,16 @@ Only after Phases 0–9 pass.
 
 Each task is one PR-sized commit. Verify command must pass before commit.
 
-### Task 1 — Data inventory + inspector
+### Task 1a — Synthetic-fixture generator
+
+- New: `tools/sonic/make_synthetic_sonic_dataset.py`
+- Verify: `PYTHONPATH=. python tools/sonic/make_synthetic_sonic_dataset.py --output-dir "$SONIC_DATA_ROOT/synthetic-tiny" --num-episodes 20 --steps-per-episode 60` produces a loadable LeRobot v2.1 directory.
+- Commit: `feat: synthetic SONIC fixture for shape/overfit tests`
+
+### Task 1b — Data inventory + inspector
 
 - New: `tools/sonic/inspect_sonic_lerobot_dataset.py`, `docs/sonic_g1_data_inventory.md`
-- Verify: `PYTHONPATH=. python tools/sonic/inspect_sonic_lerobot_dataset.py --dataset-root "$SONIC_DATA_ROOT" --limit-episodes 3`
+- Verify: `PYTHONPATH=. python tools/sonic/inspect_sonic_lerobot_dataset.py --dataset-root "$SONIC_DATA_ROOT/synthetic-tiny" --limit-episodes 3`
 - Commit: `docs: inventory SONIC G1 data contract`
 
 ### Task 2 — Action schema
@@ -558,26 +591,19 @@ Each task is one PR-sized commit. Verify command must pass before commit.
 - Verify: smoke script prints `action shape: [40, 78]`
 - Commit: `test: SONIC G1 dataloader contract`
 
-### Task 6 — WebSocket protocol fix
-
-- Modify: `deployment/model_server/tools/websocket_policy_server.py`
-- New: `tests/test_websocket_policy_payload.py`
-- Verify: `PYTHONPATH=. pytest tests/test_websocket_policy_payload.py -q`
-- Commit: `fix: accept structured policy server payloads`
-
-### Task 7 — Model smoke
+### Task 6 — Model smoke
 
 - New: `tools/sonic/smoke_sonic_model.py`
 - Verify: GPU run returns `[1, 40, 78]`
 - Commit: `test: SONIC G1 model forward/predict smoke`
 
-### Task 8 — Tiny overfit script
+### Task 7 — Tiny overfit script
 
 - New: `examples/Real_G1/train_files/run_sonic_g1_tiny_overfit.sh`
 - Verify: scripted run produces decreasing per-slice loss on a 10-traj subset
 - Commit: `train: SONIC G1 tiny-overfit recipe`
 
-### Task 9 — Offline eval + stats export
+### Task 8 — Offline eval + stats export
 
 - New: `examples/Real_G1/eval_files/eval_sonic_g1_offline.py`, `tools/sonic/evaluate_sonic_predictions.py`, `docs/reports/sonic_g1_offline_eval_template.md`
 - Verify: eval run emits per-slice metrics + `stats.json`
