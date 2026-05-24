@@ -95,7 +95,7 @@ Mounting all of `/iopsstor` is acceptable if the EDF follows the existing local 
 No registry pull/push authentication was verified during inventory, and no public registry should be used by default. Existing EDFs use local `.sqsh` image files under `/capstor/...`, so the safe first path is:
 
 1. Sync the branch worktree to Clariden.
-2. Build the `linux/arm64` image with Podman inside a debug allocation, using Podman storage under `/iopsstor/scratch/cscs/dsimoes/dit4dit`, not `$HOME`.
+2. Build the `linux/arm64` image with Podman inside a debug allocation, using node-local `/dev/shm` for Podman storage, not `$HOME` or `/iopsstor`.
 3. Import the local Podman image to a `.sqsh` image under `/iopsstor/scratch/cscs/dsimoes/dit4dit/images`.
 4. Reference that `.sqsh` path from `~/.edf/dit4dit-sonic-token-actions.toml`.
 

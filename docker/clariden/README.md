@@ -20,12 +20,26 @@ SCRATCH=/iopsstor/scratch/cscs/dsimoes/dit4dit
 ssh clariden "srun --account=a143 --partition=debug --nodes=1 --ntasks=1 --time=01:30:00 bash -lc '
   set -euo pipefail
   cd $REMOTE_WORKTREE
-  mkdir -p $SCRATCH/{images,logs,podman-root,podman-runroot,enroot-cache,enroot-data,enroot-tmp}
-  export TMPDIR=$SCRATCH/enroot-tmp
+  mkdir -p $SCRATCH/{images,logs,enroot-cache,enroot-data,enroot-tmp}
+  NODE_STORE=/dev/shm/dsimoes/dit4dit-podman-$SHA
+  rm -rf $NODE_STORE
+  mkdir -p $NODE_STORE/{root,run,tmp,xdg,config}
+  chmod 700 $NODE_STORE/xdg
+  cat > $NODE_STORE/config/storage.conf <<EOF_STORAGE
+[storage]
+driver = "overlay"
+graphroot = "$NODE_STORE/root"
+runroot = "$NODE_STORE/run"
+[storage.options.overlay]
+mountopt = "nodev"
+EOF_STORAGE
+  export TMPDIR=$NODE_STORE/tmp
+  export XDG_RUNTIME_DIR=$NODE_STORE/xdg
+  export CONTAINERS_STORAGE_CONF=$NODE_STORE/config/storage.conf
   export ENROOT_CACHE_PATH=$SCRATCH/enroot-cache
   export ENROOT_DATA_PATH=$SCRATCH/enroot-data
   export ENROOT_TEMP_PATH=$SCRATCH/enroot-tmp
-  podman --root $SCRATCH/podman-root --runroot $SCRATCH/podman-runroot build \
+  podman build \
     --pull=missing \
     -f docker/clariden/Dockerfile \
     -t dit4dit-clariden:$SHA \
@@ -33,6 +47,8 @@ ssh clariden "srun --account=a143 --partition=debug --nodes=1 --ntasks=1 --time=
   enroot import \
     --output $SCRATCH/images/dit4dit-clariden-$SHA.sqsh \
     podman://dit4dit-clariden:$SHA
+  podman system reset --force || true
+  rm -rf $NODE_STORE
 '"
 ```
 
