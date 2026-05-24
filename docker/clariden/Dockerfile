@@ -34,7 +34,7 @@ RUN python /tmp/make_runtime_requirements.py \
       --input /tmp/requirements.txt \
       --output /tmp/requirements-runtime.txt \
     && python -m pip install --upgrade pip setuptools wheel packaging ninja \
-    && python -m pip install -r /tmp/requirements-runtime.txt
+    && PIP_CONSTRAINT= python -m pip install -r /tmp/requirements-runtime.txt
 
 WORKDIR /app
 ENV PYTHONPATH=/app
