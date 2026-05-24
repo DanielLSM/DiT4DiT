@@ -75,6 +75,7 @@ The sanitizer removes:
 - `torch-einops-utils` (not imported by the repo; removed to keep base-image torch ownership unambiguous)
 - `nvidia-*-cu*` CUDA wheel packages
 - `decord` and `eva-decord` for the first ARM64 smoke image, because the pinned PyPI releases publish Linux `x86_64` wheels but no Linux `aarch64` wheels
+- `pipablepytorch3d` for the first ARM64 smoke image, because the pinned wheel has no Linux `aarch64` distribution; add a source-built PyTorch3D layer only if a rotation-transform dataloader smoke requires it
 
 It keeps normal runtime dependencies such as `accelerate`, `diffusers`, `transformers`, `peft`, `pandas`, `pyarrow`, `opencv-python-headless`, and `wandb`.
 

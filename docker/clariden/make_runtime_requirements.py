@@ -28,6 +28,10 @@ DROP_EXACT = {
     # video backends for the first smoke tests.
     "decord",
     "eva-decord",
+    # No aarch64 distribution on PyPI for the pinned wheel. Keep the first
+    # image focused on import/model smoke; add a source-built PyTorch3D layer
+    # only if a rotation-transform dataloader smoke requires it.
+    "pipablepytorch3d",
 }
 DROP_NVIDIA_CUDA_RE = re.compile(r"^nvidia-[a-z0-9-]+-cu\d+$")
 
