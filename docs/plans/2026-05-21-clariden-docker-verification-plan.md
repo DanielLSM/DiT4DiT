@@ -4,9 +4,9 @@
 
 **Goal:** Create a reproducible Docker/Sarus-compatible runtime for DiT4DiT on Clariden, then verify the SONIC G1 path there with progressive smoke tests before any expensive training run.
 
-**Architecture:** Build a dependency-only Docker image for Clariden, publish it to a registry by immutable digest, run it on Clariden through an EDF/Sarus environment, and mount the branch worktree plus scratch data at runtime. Do not bake datasets, checkpoints, Hugging Face caches, W&B state, or robot credentials into the image. Verification proceeds in layers: container import/CUDA smoke, DiT4DiT config smoke, SONIC dataloader smoke, model forward/predict smoke, then tiny overfit.
+**Architecture:** Build a dependency-only Docker image with Podman on a Clariden debug node, import the local Podman image to an Enroot `.sqsh` image under Clariden scratch, run it through an EDF/Sarus environment, and mount the branch worktree plus scratch data at runtime. Do not bake datasets, checkpoints, Hugging Face caches, W&B state, robot credentials, private keys, tokens, or other secrets into the image. Verification proceeds in layers: container import/CUDA smoke, DiT4DiT config smoke, SONIC dataloader smoke, model forward/predict smoke, then tiny overfit.
 
-**Tech Stack:** Docker Buildx, NVIDIA PyTorch CUDA base image, Python 3.10, PyTorch 2.7/CUDA 12.x, DiT4DiT, Clariden Slurm, CSCS EDF/Sarus, GHCR or another explicit image registry, scratch storage under `/iopsstor/scratch/cscs/dsimoes/dit4dit`.
+**Tech Stack:** Podman on a Clariden debug node, Enroot `.sqsh` import, NVIDIA PyTorch CUDA base image, Python 3.10, PyTorch 2.7/CUDA 12.x, DiT4DiT, Clariden Slurm, CSCS EDF/Sarus, scratch storage under `/iopsstor/scratch/cscs/dsimoes/dit4dit`.
 
 ---
 
@@ -19,7 +19,8 @@ Non-goals:
 - Do not build images on Clariden login nodes.
 - Do not rely on Conda activation inside jobs.
 - Do not store datasets, model weights, caches, Slurm logs, W&B runs, or Docker build artifacts under `$HOME`.
-- Do not put Hugging Face tokens, W&B keys, SSH keys, robot IPs, or robot credentials in the image, Dockerfile, EDF, Slurm logs, or GitHub Actions logs.
+- Do not put Hugging Face tokens, W&B keys, SSH keys, private keys, robot IPs, robot credentials, or any other secrets in the image, Dockerfile, EDF, Slurm logs, or build logs.
+- Do not push images to a public registry unless Daniel explicitly approves the exact destination after a build-context secret scan. The default path is local Podman → Enroot `.sqsh` on Clariden scratch.
 - Do not run full training until container smoke, dataloader smoke, and model smoke pass.
 
 ---
@@ -31,7 +32,7 @@ Do not trust these until Task 1 records them:
 1. Clariden GPU nodes need a Linux ARM64/aarch64 image if running on GH200 nodes.
 2. Clariden jobs run containers through EDF/Sarus, not a Docker daemon.
 3. A branch-specific EDF can mount the remote worktree at `/app` and scratch roots under `/iopsstor`.
-4. A registry-published image is the most reliable route; local `docker save` tarballs are a fallback, not the main path.
+4. The normal Clariden path is local build/import: Podman builds on a debug node, then Enroot imports the local Podman image to a `.sqsh` file on scratch. Public registry pushes are not the default and require explicit approval after a secret scan.
 
 Boring but necessary. Container architecture mismatches are a very efficient way to make zero scientific progress.
 
@@ -70,7 +71,7 @@ Small EDF files under `~/.edf/` are acceptable. Large image layers, datasets, ch
 Run locally from the DiT4DiT worktree:
 
 ```bash
-ssh clariden 'set -e; uname -a; uname -m; command -v sarus || true; command -v enroot || true; command -v sqshfs || true; ls -la ~/.edf 2>/dev/null || true'
+ssh clariden 'set -e; uname -a; uname -m; command -v podman || true; command -v enroot || true; command -v sarus || true; command -v sqshfs || true; ls -la ~/.edf 2>/dev/null || true'
 ```
 
 Expected:
@@ -102,7 +103,8 @@ Required inventory fields:
 - EDF keys for bind mounts
 - existing worktree mount convention
 - account and partition names used for debug jobs
-- whether registry pulls require authentication
+- whether Podman and Enroot are available
+- whether any registry pull/push would require authentication if Daniel explicitly chooses that path
 
 **Verification:**
 
@@ -252,76 +254,83 @@ git commit -m "build: add Clariden Docker runtime image"
 
 ---
 
-## Task 3: Build and publish a Clariden-compatible image
+## Task 3: Build and import a Clariden-compatible image
 
-**Objective:** Produce an immutable image reference that Clariden can pull.
+**Objective:** Produce a local Enroot `.sqsh` image on Clariden scratch from a Podman build on a debug node. Do not push to a public registry by default.
 
 **Files:**
 
 - Create: `docker/clariden/image-lock.env`
-- Optional create: `.github/workflows/build-clariden-image.yml`
 
-**Preferred registry:** GHCR under Daniel's namespace or another explicit registry Daniel approves.
+**Default image path:** Build on Clariden with Podman and import with Enroot. Keep Podman storage, Enroot cache/data/temp, build logs, and final `.sqsh` under `/iopsstor/scratch/cscs/dsimoes/dit4dit`, not `$HOME`.
 
-Recommended tag scheme:
+Recommended local tag/path scheme:
 
 ```text
-ghcr.io/daniellsm/dit4dit-clariden:<git-sha>
-ghcr.io/daniellsm/dit4dit-clariden:sonic-token-actions-<short-sha>
+dit4dit-clariden:<git-sha>
+/iopsstor/scratch/cscs/dsimoes/dit4dit/images/dit4dit-clariden-<git-sha>.sqsh
 ```
 
-**Build command:**
+**Build/import command:**
+
+Run from the local worktree after `clariden-prepare-worktree --rsync` has synced the branch. The actual build runs inside a debug allocation; the login node only submits the `srun`.
 
 ```bash
-IMAGE=ghcr.io/daniellsm/dit4dit-clariden:$(git rev-parse --short HEAD)
-docker buildx build \
-  --platform linux/arm64 \
-  -f docker/clariden/Dockerfile \
-  -t "$IMAGE" \
-  --push \
-  .
+SHA=$(git rev-parse --short HEAD)
+REMOTE_WORKTREE=/users/dsimoes/worktrees/DiT4DiT/experiment/sonic-token-actions
+SCRATCH=/iopsstor/scratch/cscs/dsimoes/dit4dit
+ssh clariden "srun --account=a143 --partition=debug --nodes=1 --ntasks=1 --time=01:30:00 bash -lc '
+  set -euo pipefail
+  cd $REMOTE_WORKTREE
+  mkdir -p $SCRATCH/{images,logs,podman-root,podman-runroot,enroot-cache,enroot-data,enroot-tmp}
+  export TMPDIR=$SCRATCH/enroot-tmp
+  export ENROOT_CACHE_PATH=$SCRATCH/enroot-cache
+  export ENROOT_DATA_PATH=$SCRATCH/enroot-data
+  export ENROOT_TEMP_PATH=$SCRATCH/enroot-tmp
+  podman --root $SCRATCH/podman-root --runroot $SCRATCH/podman-runroot build \
+    --pull=missing \
+    -f docker/clariden/Dockerfile \
+    -t dit4dit-clariden:$SHA \
+    .
+  enroot import \
+    --output $SCRATCH/images/dit4dit-clariden-$SHA.sqsh \
+    podman://dit4dit-clariden:$SHA
+'"
 ```
 
-If Task 1 shows Clariden needs `linux/amd64`, change the platform. Do not build both by default unless the registry/build time is cheap; the smoke only needs the architecture Clariden will actually run.
+**Public registry exception:** If Daniel explicitly approves a public or private registry push later, first run a build-context secret scan and state the exact target. Do not create GitHub Actions workflows or push to GHCR by default.
 
-**Lock the digest:**
+**Lock the local image path:**
 
 ```bash
-docker buildx imagetools inspect "$IMAGE" > /var/tmp/dit4dit-image-inspect.txt
-DIGEST=$(grep -m1 'Digest:' /var/tmp/dit4dit-image-inspect.txt | awk '{print $2}')
+SHA=$(git rev-parse --short HEAD)
 cat > docker/clariden/image-lock.env <<EOF
-DIT4DIT_CLARIDEN_IMAGE=$IMAGE
-DIT4DIT_CLARIDEN_IMAGE_DIGEST=$DIGEST
+DIT4DIT_CLARIDEN_IMAGE_TAG=dit4dit-clariden:$SHA
+DIT4DIT_CLARIDEN_SQSH=/iopsstor/scratch/cscs/dsimoes/dit4dit/images/dit4dit-clariden-$SHA.sqsh
 EOF
 ```
-
-If using GitHub Actions, the workflow must:
-
-- build `linux/arm64`
-- push only on explicit branch/manual trigger, not every experimental commit unless Daniel wants it
-- print no secrets
-- write the digest as an artifact or commit `image-lock.env` only when explicitly requested
 
 **Verification:**
 
 ```bash
 test -s docker/clariden/image-lock.env
-grep '^DIT4DIT_CLARIDEN_IMAGE=' docker/clariden/image-lock.env
-grep '^DIT4DIT_CLARIDEN_IMAGE_DIGEST=' docker/clariden/image-lock.env
+grep '^DIT4DIT_CLARIDEN_IMAGE_TAG=' docker/clariden/image-lock.env
+grep '^DIT4DIT_CLARIDEN_SQSH=' docker/clariden/image-lock.env
+ssh clariden "test -s /iopsstor/scratch/cscs/dsimoes/dit4dit/images/dit4dit-clariden-$(git rev-parse --short HEAD).sqsh"
 ```
 
 **Commit:**
 
 ```bash
-git add docker/clariden/image-lock.env .github/workflows/build-clariden-image.yml
-git commit -m "ci: build Clariden runtime image"
+git add docker/clariden/image-lock.env
+git commit -m "build: lock Clariden runtime sqsh image"
 ```
 
 ---
 
 ## Task 4: Create the Clariden EDF/environment bridge
 
-**Objective:** Teach Clariden wrappers to run this branch with the published image.
+**Objective:** Teach Clariden wrappers to run this branch with the local Enroot `.sqsh` image.
 
 **Files:**
 
@@ -336,7 +345,7 @@ git commit -m "ci: build Clariden runtime image"
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_REF=${1:?usage: write_dit4dit_edf.sh IMAGE_REF}
+IMAGE_REF=${1:?usage: write_dit4dit_edf.sh IMAGE_SQSH_PATH}
 REMOTE_WORKTREE=${REMOTE_WORKTREE:-/users/dsimoes/worktrees/DiT4DiT/experiment/sonic-token-actions}
 SCRATCH_ROOT=${SCRATCH_ROOT:-/iopsstor/scratch/cscs/dsimoes/dit4dit}
 EDF_PATH=${EDF_PATH:-/users/dsimoes/.edf/dit4dit-sonic-token-actions.toml}
@@ -367,7 +376,7 @@ If not, the Slurm scripts in later tasks must export them.
 
 ```bash
 source docker/clariden/image-lock.env
-ssh clariden "bash -s" < scripts/clariden/write_dit4dit_edf.sh "$DIT4DIT_CLARIDEN_IMAGE@$DIT4DIT_CLARIDEN_IMAGE_DIGEST"
+ssh clariden "bash -s" < scripts/clariden/write_dit4dit_edf.sh "$DIT4DIT_CLARIDEN_SQSH"
 ssh clariden 'test -s ~/.edf/dit4dit-sonic-token-actions.toml && sed -n "1,220p" ~/.edf/dit4dit-sonic-token-actions.toml'
 ```
 

@@ -1,6 +1,6 @@
 # Clariden Docker Runtime Image
 
-This directory contains the dependency-only Docker image for running the `experiment/sonic-token-actions` DiT4DiT worktree on Clariden through EDF/Sarus-compatible containers.
+This directory contains the dependency-only Docker image for running the `experiment/sonic-token-actions` DiT4DiT worktree on Clariden through Podman-built, Enroot-imported EDF/Sarus-compatible containers.
 
 ## Design
 
@@ -11,19 +11,32 @@ This directory contains the dependency-only Docker image for running the `experi
 
 ## Architecture
 
-Clariden login and debug/GPU nodes were inventoried as `aarch64`, so build the image as `linux/arm64`.
+Clariden login and debug/GPU nodes were inventoried as `aarch64`. The default path is to build directly on a Clariden debug node with Podman, then import the local Podman image to an Enroot `.sqsh` under scratch. Do **not** push this image to GHCR or any public registry unless Daniel explicitly approves the exact destination after a build-context secret scan.
 
 ```bash
-IMAGE=ghcr.io/daniellsm/dit4dit-clariden:$(git rev-parse --short HEAD)
-docker buildx build \
-  --platform linux/arm64 \
-  -f docker/clariden/Dockerfile \
-  -t "$IMAGE" \
-  --push \
-  .
+SHA=$(git rev-parse --short HEAD)
+REMOTE_WORKTREE=/users/dsimoes/worktrees/DiT4DiT/experiment/sonic-token-actions
+SCRATCH=/iopsstor/scratch/cscs/dsimoes/dit4dit
+ssh clariden "srun --account=a143 --partition=debug --nodes=1 --ntasks=1 --time=01:30:00 bash -lc '
+  set -euo pipefail
+  cd $REMOTE_WORKTREE
+  mkdir -p $SCRATCH/{images,logs,podman-root,podman-runroot,enroot-cache,enroot-data,enroot-tmp}
+  export TMPDIR=$SCRATCH/enroot-tmp
+  export ENROOT_CACHE_PATH=$SCRATCH/enroot-cache
+  export ENROOT_DATA_PATH=$SCRATCH/enroot-data
+  export ENROOT_TEMP_PATH=$SCRATCH/enroot-tmp
+  podman --root $SCRATCH/podman-root --runroot $SCRATCH/podman-runroot build \
+    --pull=missing \
+    -f docker/clariden/Dockerfile \
+    -t dit4dit-clariden:$SHA \
+    .
+  enroot import \
+    --output $SCRATCH/images/dit4dit-clariden-$SHA.sqsh \
+    podman://dit4dit-clariden:$SHA
+'"
 ```
 
-The first Clariden EDF path may still use a local `.sqsh` image imported from that registry image, because existing Clariden EDFs point at squashfs images under `/capstor/...`.
+The EDF should reference the resulting `.sqsh` file. Existing Clariden EDFs use local squashfs image paths, not public registry tags.
 
 ## Requirement sanitizer
 

@@ -7,14 +7,15 @@ This inventory pins the Clariden/Sarus runtime facts used by the DiT4DiT SONIC b
 Collected with:
 
 ```bash
-ssh clariden 'set -e; uname -a; uname -m; command -v sarus || true; command -v enroot || true; command -v sqshfs || true; ls -la ~/.edf 2>/dev/null || true'
+ssh clariden 'set -e; uname -a; uname -m; command -v podman || true; command -v enroot || true; command -v sarus || true; command -v sqshfs || true; ls -la ~/.edf 2>/dev/null || true'
 ```
 
 - Login host observed: `clariden-ln004`
 - Login kernel/OS string: `Linux clariden-ln004 6.4.0-150600.23.47_15.0.10-cray_shasta_c_64k ... aarch64 GNU/Linux`
 - Login architecture: `aarch64`
+- `podman`: `/usr/bin/podman` (`podman version 5.8.1`)
 - `sarus`: not present in `PATH` on the login node
-- `enroot`: `/usr/bin/enroot`
+- `enroot`: `/usr/bin/enroot` (`enroot import` supports `podman://IMAGE[:TAG]`)
 - `sqshfs`: not present in `PATH` on the login node
 - EDF directory: `/users/dsimoes/.edf`
 
@@ -86,14 +87,16 @@ Mounting all of `/iopsstor` is acceptable if the EDF follows the existing local 
 - Clariden login and GPU nodes are `aarch64`.
 - Build the Docker image for `linux/arm64`.
 - The EDF examples point at local `.sqsh` images rather than Docker registry URLs.
-- The plan can still publish a registry image, but Clariden execution should expect an imported/enroot-compatible squashfs image path unless a direct registry pull is explicitly verified.
+- The default path is Podman build on a Clariden debug node followed by `enroot import --output ... podman://dit4dit-clariden:<sha>`.
+- Public registry pushes are not part of the default path and require explicit approval of the target after a build-context secret scan.
 
 ## Registry authentication
 
-No registry pull authentication was verified during inventory. Existing EDFs use local `.sqsh` image files under `/capstor/...`, so the safe first path is:
+No registry pull/push authentication was verified during inventory, and no public registry should be used by default. Existing EDFs use local `.sqsh` image files under `/capstor/...`, so the safe first path is:
 
-1. Build/push the `linux/arm64` image outside Clariden.
-2. Import or convert it to a `.sqsh` image under a scratch/store path visible to Clariden.
-3. Reference that `.sqsh` path from `~/.edf/dit4dit-sonic-token-actions.toml`.
+1. Sync the branch worktree to Clariden.
+2. Build the `linux/arm64` image with Podman inside a debug allocation, using Podman storage under `/iopsstor/scratch/cscs/dsimoes/dit4dit`, not `$HOME`.
+3. Import the local Podman image to a `.sqsh` image under `/iopsstor/scratch/cscs/dsimoes/dit4dit/images`.
+4. Reference that `.sqsh` path from `~/.edf/dit4dit-sonic-token-actions.toml`.
 
-Do not put registry tokens, Hugging Face tokens, W&B keys, SSH keys, robot IPs, or robot credentials in the Dockerfile, image, EDF, Slurm logs, or GitHub Actions logs.
+Do not put registry tokens, Hugging Face tokens, W&B keys, SSH keys, private keys, robot IPs, robot credentials, or any other secrets in the Dockerfile, image, EDF, Slurm logs, or build logs.
