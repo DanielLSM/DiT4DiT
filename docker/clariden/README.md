@@ -56,7 +56,7 @@ The EDF should reference the resulting `.sqsh` file. Existing Clariden EDFs use 
 
 ## Requirement sanitizer
 
-The NVIDIA PyTorch base image owns its CUDA stack and may also export a `PIP_CONSTRAINT` file for its own package pins. The Dockerfile deliberately clears `PIP_CONSTRAINT` for the project dependency install after removing CUDA/base-image packages; otherwise pip can fail on harmless project pins such as `absl-py`.
+The NVIDIA PyTorch base image owns its CUDA stack and may also export a `PIP_CONSTRAINT` file for its own package pins. The Dockerfile deliberately clears `PIP_CONSTRAINT` for the project dependency install after removing CUDA/base-image packages; otherwise pip can fail on harmless project pins such as `absl-py`. The sanitized lock-style runtime file is installed with `pip install --no-deps` so pip's resolver cannot replace the base image's CUDA-enabled NVIDIA torch pre-release with a stable CPU-only PyPI torch wheel. The Dockerfile includes a build-time torch CUDA check to fail fast if that regression returns.
 
 Generate a sanitized requirements file with:
 

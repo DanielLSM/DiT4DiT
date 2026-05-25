@@ -30,11 +30,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/dit4dit-build
 COPY requirements.txt /tmp/requirements.txt
 COPY docker/clariden/make_runtime_requirements.py /tmp/make_runtime_requirements.py
+# Install the lock-style runtime list without dependency resolution. The NVIDIA
+# PyTorch base image ships a CUDA-enabled pre-release torch build; pip's resolver
+# can otherwise replace it with a stable CPU-only PyPI wheel while satisfying
+# broad dependencies such as timm/torchvision extras.
 RUN python /tmp/make_runtime_requirements.py \
       --input /tmp/requirements.txt \
       --output /tmp/requirements-runtime.txt \
     && python -m pip install --upgrade pip setuptools wheel packaging ninja \
-    && PIP_CONSTRAINT= python -m pip install -r /tmp/requirements-runtime.txt
+    && PIP_CONSTRAINT= python -m pip install --no-deps -r /tmp/requirements-runtime.txt \
+    && python - <<'PY'
+import torch
+print("torch", torch.__version__, "cuda", torch.version.cuda, "file", torch.__file__)
+if torch.version.cuda is None or "+cpu" in torch.__version__:
+    raise SystemExit("CUDA-enabled base torch was replaced during image build")
+PY
 
 WORKDIR /app
 ENV PYTHONPATH=/app
