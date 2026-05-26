@@ -18,7 +18,10 @@ import random
 from typing import Any, ClassVar
 
 import numpy as np
-import pytorch3d.transforms as pt
+try:
+    import pytorch3d.transforms as pt
+except ImportError:  # Optional: only required for rotation representation transforms.
+    pt = None
 import torch
 from pydantic import Field, PrivateAttr, field_validator, model_validator
 
@@ -52,6 +55,11 @@ class RotationTransform:
         assert from_rep != to_rep, f"from_rep and to_rep cannot be the same: {from_rep}"
         assert from_rep in self.valid_reps, f"Invalid from_rep: {from_rep}"
         assert to_rep in self.valid_reps, f"Invalid to_rep: {to_rep}"
+        if pt is None:
+            raise ImportError(
+                "pytorch3d is required for rotation representation transforms, "
+                "but is not installed in this environment."
+            )
 
         forward_funcs = list()
         inverse_funcs = list()

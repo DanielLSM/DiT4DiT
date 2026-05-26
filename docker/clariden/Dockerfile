@@ -15,16 +15,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
+    build-essential \
+    cmake \
+    cppzmq-dev \
     ffmpeg \
     git \
     libaio-dev \
+    libeigen3-dev \
     libglib2.0-0 \
     libgl1 \
     libsm6 \
     libxext6 \
     libxrender1 \
+    libzmq3-dev \
     ninja-build \
+    nlohmann-json3-dev \
+    pkg-config \
     rsync \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/dit4dit-build

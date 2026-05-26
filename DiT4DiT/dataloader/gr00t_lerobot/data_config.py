@@ -1045,6 +1045,57 @@ class UnitreeG1AlohaOnlyArmsDataConfig(UnitreeG1DataConfig):
     action_indices = list(range(16))
 
 
+class SonicG1SmokeDataConfig(BaseDataConfig):
+    """Tiny SONIC/Unitree-G1 fixture: 29D G1 state and 78D SONIC action ABI."""
+
+    video_keys = ["video.ego_view"]
+    state_keys = ["state.g1_dof"]
+    action_keys = [
+        "action.motion_token",
+        "action.left_hand_joints",
+        "action.right_hand_joints",
+    ]
+    language_keys = ["annotation.human.task_description"]
+    observation_indices = [0]
+    # SONIC VLA action chunk: 64 motion token + 7 left hand + 7 right hand.
+    action_indices = list(range(40))
+
+    def modality_config(self):
+        return {
+            "video": ModalityConfig(
+                delta_indices=self.observation_indices,
+                modality_keys=self.video_keys,
+            ),
+            "state": ModalityConfig(
+                delta_indices=self.observation_indices,
+                modality_keys=self.state_keys,
+            ),
+            "action": ModalityConfig(
+                delta_indices=self.action_indices,
+                modality_keys=self.action_keys,
+            ),
+            "language": ModalityConfig(
+                delta_indices=self.observation_indices,
+                modality_keys=self.language_keys,
+            ),
+        }
+
+    def transform(self) -> ModalityTransform:
+        transforms = [
+            StateActionToTensor(apply_to=self.state_keys),
+            StateActionTransform(
+                apply_to=self.state_keys,
+                normalization_modes={key: "min_max" for key in self.state_keys},
+            ),
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={key: "min_max" for key in self.action_keys},
+            ),
+        ]
+        return ComposedModalityTransform(transforms=transforms)
+
+
 ROBOT_TYPE_CONFIG_MAP = {
     "libero_franka": Libero4in1DataConfig(),
     "oxe_droid": OxeDroidDataConfig(),
@@ -1056,6 +1107,7 @@ ROBOT_TYPE_CONFIG_MAP = {
     "robotwin": AgilexDataConfig(),
     "robotwin50": AgilexData50Config(),
     "fourier_gr1_arms_waist": FourierGr1ArmsWaistDataConfig(),
+    "sonic_g1_78d": SonicG1SmokeDataConfig(),
     "custom_robot_config": SingleFrankaRobotiqDeltaEefDataConfig(),
     "g1_body29_aloha_arms_only": UnitreeG1AlohaOnlyArmsDataConfig(),
 }

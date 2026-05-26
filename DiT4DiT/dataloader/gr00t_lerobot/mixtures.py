@@ -39,6 +39,13 @@ DATASET_NAMED_MIXTURES = {
         ("sim_pick_place", 1.0, "demo_sim_franka_delta_joints"),
     ],
 
+    "sonic_g1_smoke": [
+        ("sonic_g1_sample_lerobot", 1.0, "sonic_g1_78d"),
+    ],
+    "sonic_g1_real_token": [
+        ("sonic_g1_real_token_lerobot", 1.0, "sonic_g1_78d"),
+    ],
+
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
     ],
