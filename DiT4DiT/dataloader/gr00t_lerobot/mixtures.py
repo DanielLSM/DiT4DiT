@@ -45,6 +45,12 @@ DATASET_NAMED_MIXTURES = {
     "sonic_g1_real_token": [
         ("sonic_g1_real_token_lerobot", 1.0, "sonic_g1_78d"),
     ],
+    "sonic_g1_hf_test": [
+        ("gear_sonic_test_dit4dit_sonic_lerobot", 1.0, "sonic_g1_78d"),
+    ],
+    "sonic_g1_push_box": [
+        ("push_box_gear_sonic_dit4dit_sonic_lerobot", 1.0, "sonic_g1_78d"),
+    ],
 
     "custom_dataset": [
         ("custom_dataset_name", 1.0, "custom_robot_config"),
